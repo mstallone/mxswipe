@@ -3,10 +3,10 @@
   "pins" : [
     {
       "identity" : "menuhub",
-      "kind" : "localSourceControl",
+      "kind" : "remoteSourceControl",
       "location" : "https://github.com/mstallone/menuhub",
       "state" : {
-        "revision" : "48923275ac3fb27cf84ea623fc48cc2c74acf088",
+        "revision" : "42baa87243d8d8103488de285273e4cc7dfb0310",
         "version" : "0.5.0"
       }
     },
