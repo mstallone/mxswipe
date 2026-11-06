@@ -65,6 +65,10 @@ matches the app's signature: open the menu, hold Option, and choose Reset Access
 - Taps and the fallback press Control-arrow with `AXUIElementPostKeyboardEvent`, because system
   shortcuts ignore key events that apps post. Whether Mission Control is open is read from the
   Dock's Accessibility tree.
+- Mission Control moves a display in full screen to its desktop, and clicking a window keeps it
+  there, even when the window is on another display. When the panel opened Mission Control, MXSwipe
+  puts each display the click wasn't on back in its full-screen Space with SkyLight's
+  `SLSManagedDisplaySetCurrentSpace`. Mission Control opened any other way keeps the system behavior.
 
 ## Install
 
@@ -90,6 +94,7 @@ MX Master 4 without changing it, and is skipped unless asked for:
     Sources/MXSwipe/HIDDevice.swift         IOKit access to the receiver's HID++ interface
     Sources/MXSwipe/GestureRecognizer.swift panel motion to one continuous gesture
     Sources/MXSwipe/DockSwipe.swift         gestures to Dock swipes, shortcut fallback
+    Sources/MXSwipe/FullScreenSpaces.swift  keeps full-screen Spaces through a Mission Control click
     Sources/MXSwipe/ThumbWheel.swift        thumb wheel to trackpad-style scrolling
     Sources/SystemEvents/                   the macOS 27 HIDEvent and the Accessibility key press
     Resources/Info.plist                    bundle template; the version is stamped at build time

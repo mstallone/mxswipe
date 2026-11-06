@@ -69,7 +69,7 @@ final class MXMasterSession: @unchecked Sendable {
     private var pending: PendingRequest?
 
     private let recognizer: ContinuousGestureRecognizer
-    private let dockSwipe = DockSwipeController()
+    private let dockSwipe: DockSwipeController
     private lazy var thumbScroll = ThumbWheelScrollController(queue: queue)
     private var onEvent: (@Sendable (SessionEvent) -> Void)?
 
@@ -96,6 +96,8 @@ final class MXMasterSession: @unchecked Sendable {
             motionActivationDelay: 0.06,
             allowsDownwardGesture: DockSwipeController.isMissionControlOpen
         )
+        let spaceQueue = DispatchQueue(label: "com.mattstallone.mxmasterinput.spaces", qos: .userInitiated)
+        dockSwipe = DockSwipeController(spaceKeeper: FullScreenSpaceKeeper(queue: spaceQueue))
     }
 
     /// Connects to the first MX Master 4 found. In observation mode nothing on the mouse is changed and
