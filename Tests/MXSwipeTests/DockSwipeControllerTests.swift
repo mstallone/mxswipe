@@ -220,6 +220,36 @@ final class DockSwipeControllerTests: XCTestCase {
         XCTAssertEqual(field(dock, 129), 12)
     }
 
+    func testPanelMotionIsSummedWhileADrainIsPending() {
+        let buffer = PanelMotionBuffer()
+        XCTAssertTrue(buffer.add(3))
+        XCTAssertFalse(buffer.add(4))
+        XCTAssertFalse(buffer.add(-2))
+        let motion = buffer.take()
+        XCTAssertEqual(motion.total, 5)
+        XCTAssertEqual(motion.latest, -2)
+        XCTAssertTrue(buffer.add(-6))
+    }
+
+    func testDrainAfterItsMotionWasTakenChangesNothing() {
+        let controller = makeController()
+        let buffer = PanelMotionBuffer()
+        controller.handle(.began(axis: .horizontal, delta: -30))
+        let stale = buffer.take()
+        controller.move(by: stale.total, latest: stale.latest)
+        XCTAssertEqual(swipes.count, 1)
+    }
+
+    func testSummedMotionTakesDirectionAndExitSpeedFromTheLatestReport() throws {
+        let controller = makeController()
+        controller.handle(.began(axis: .horizontal, delta: -30))
+        controller.move(by: -35, latest: 5) // reversing, though the sum still moves forward
+        controller.handle(.ended)
+        let last = try XCTUnwrap(swipes.last)
+        XCTAssertEqual(last.phase, .cancelled)
+        XCTAssertEqual(last.exitSpeed, Double(-5) * DockSwipeController.progressPerUnit * 100, accuracy: 1e-9)
+    }
+
     private func assertProgress(_ expected: [Double], file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertEqual(swipes.count, expected.count, file: file, line: line)
         for (swipe, value) in zip(swipes, expected) {

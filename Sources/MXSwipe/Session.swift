@@ -65,12 +65,15 @@ final class MXMasterSession: @unchecked Sendable {
     /// Dock swipes and shortcuts post from their own queue: an Accessibility call can stall, and HID
     /// input must keep flowing meanwhile.
     private let outputQueue = DispatchQueue(label: "com.mattstallone.mxmasterinput.output", qos: .userInteractive)
+    /// Scrolling posts on its own queue for the same reason, and so that it can't delay the Dock.
+    private let scrollQueue = DispatchQueue(label: "com.mattstallone.mxmasterinput.scroll", qos: .userInteractive)
     private let pendingLock = NSLock()
     private var pending: PendingRequest?
 
     private let recognizer: ContinuousGestureRecognizer
     private let dockSwipe: DockSwipeController
-    private lazy var thumbScroll = ThumbWheelScrollController(queue: queue)
+    private let panelMotion = PanelMotionBuffer()
+    private lazy var thumbScroll = ThumbWheelScrollController(queue: queue, postQueue: scrollQueue)
     private var onEvent: (@Sendable (SessionEvent) -> Void)?
 
     private var device: HIDDevice?
@@ -129,11 +132,12 @@ final class MXMasterSession: @unchecked Sendable {
         }
     }
 
-    /// For app termination, when there is no time to await. Also waits for the cancelled swipe to post,
-    /// so quitting mid-gesture can't leave the Dock between Spaces.
+    /// For app termination, when there is no time to await. Also waits for the cancelled swipe and scroll
+    /// to post, so quitting mid-gesture can't leave the Dock between Spaces.
     func stopSynchronously() {
         queue.sync { stopOnQueue() }
         outputQueue.sync {}
+        scrollQueue.sync {}
     }
 
     // MARK: Connecting
@@ -514,8 +518,22 @@ final class MXMasterSession: @unchecked Sendable {
         }
     }
 
+    /// Motion is summed until the output queue reaches it. Any other event takes the sum with it, so a
+    /// drain still queued can't pick up motion from after that event.
     private func output(_ event: PanelGestureEvent) {
-        outputQueue.async { [dockSwipe] in dockSwipe.handle(event) }
+        if case let .changed(delta) = event {
+            guard panelMotion.add(delta) else { return }
+            outputQueue.async { [dockSwipe, panelMotion] in
+                let motion = panelMotion.take()
+                dockSwipe.move(by: motion.total, latest: motion.latest)
+            }
+        } else {
+            let motion = panelMotion.take()
+            outputQueue.async { [dockSwipe] in
+                dockSwipe.move(by: motion.total, latest: motion.latest)
+                dockSwipe.handle(event)
+            }
+        }
     }
 
     private func cancelGesture() {

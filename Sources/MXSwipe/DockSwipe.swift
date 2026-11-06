@@ -1,7 +1,38 @@
 import AppKit
 import ApplicationServices
 import Carbon.HIToolbox
+import Synchronization
 import SystemEvents
+
+/// Panel motion waiting to reach the Dock. Reports that arrive while a post is running are summed, so a
+/// slow post delays the desktop by one event rather than by a growing queue of stale ones.
+final class PanelMotionBuffer: Sendable {
+    private struct State {
+        var total = 0
+        var latest = 0
+        var drainScheduled = false
+    }
+
+    private let state = Mutex(State())
+
+    /// Returns true when the caller must schedule a `take()`; one is otherwise already on its way.
+    func add(_ delta: Int) -> Bool {
+        state.withLock {
+            $0.total += delta
+            $0.latest = delta
+            guard !$0.drainScheduled else { return false }
+            $0.drainScheduled = true
+            return true
+        }
+    }
+
+    func take() -> (total: Int, latest: Int) {
+        state.withLock {
+            defer { $0 = State() }
+            return ($0.total, $0.latest)
+        }
+    }
+}
 
 /// Drives the Dock's Space and Mission Control transitions from panel gestures, the way a trackpad does:
 /// the desktop follows the finger, then commits or springs back on release. When the private DockSwipe
@@ -61,10 +92,7 @@ final class DockSwipeController: @unchecked Sendable {
             usesKeyboardFallback = !post(swipe(.began))
 
         case let .changed(delta):
-            guard let axis, delta != 0 else { return }
-            lastDelta = Self.progress(for: delta, axis: axis)
-            progress += lastDelta
-            if !usesKeyboardFallback { _ = post(swipe(.changed)) }
+            move(by: delta, latest: delta)
 
         case .ended:
             guard let axis else { return }
@@ -80,6 +108,16 @@ final class DockSwipeController: @unchecked Sendable {
         case .cancelled:
             cancel()
         }
+    }
+
+    /// Applies motion summed from reports ending in `latest`, which alone sets the direction and exit
+    /// speed: the sum says how far the panel moved, not how fast or which way it was last going.
+    func move(by delta: Int, latest: Int) {
+        guard let axis, latest != 0 else { return }
+        lastDelta = Self.progress(for: latest, axis: axis)
+        guard delta != 0 else { return }
+        progress += Self.progress(for: delta, axis: axis)
+        if !usesKeyboardFallback { _ = post(swipe(.changed)) }
     }
 
     /// A tap on the panel: Mission Control, immediately.
