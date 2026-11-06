@@ -18,6 +18,39 @@ final class DockSwipeControllerTests: XCTestCase {
         )
     }
 
+    func testOnlyMissionControlInputsPrepareTheSpaceKeeper() {
+        var prepared = 0
+        let keeper = FullScreenSpaceKeeper(
+            queue: DispatchQueue(label: "test"),
+            displays: {
+                prepared += 1
+                return []
+            },
+            missionControlState: { false },
+            clickCount: { 0 },
+            cursorDisplay: { nil },
+            setCurrentSpace: { _, _ in },
+            schedule: { _, _ in }
+        )
+        let controller = DockSwipeController(
+            post: { _ in true },
+            postControlArrow: { _ in true },
+            naturalScrolling: { true },
+            spaceKeeper: keeper
+        )
+
+        controller.handle(.began(axis: .horizontal, delta: -30))
+        controller.handle(.ended)
+        XCTAssertEqual(prepared, 0)
+
+        controller.handle(.began(axis: .vertical, delta: -30))
+        controller.handle(.ended)
+        XCTAssertEqual(prepared, 1)
+
+        controller.tap()
+        XCTAssertEqual(prepared, 2)
+    }
+
     func testForwardMotionBeginsChangesAndCommits() {
         let controller = makeController()
         controller.handle(.began(axis: .horizontal, delta: -30))

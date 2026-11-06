@@ -27,6 +27,7 @@ final class DockSwipeController: @unchecked Sendable {
     private let post: (Swipe) -> Bool
     private let postControlArrow: (Int) -> Bool
     private let naturalScrolling: () -> Bool
+    private let spaceKeeper: FullScreenSpaceKeeper?
 
     private var axis: GestureAxis?
     private var progress = 0.0
@@ -39,17 +40,20 @@ final class DockSwipeController: @unchecked Sendable {
     init(
         post: @escaping (Swipe) -> Bool = DockSwipeController.post,
         postControlArrow: @escaping (Int) -> Bool = { MXPostControlArrow(CGKeyCode($0)) },
-        naturalScrolling: @escaping () -> Bool = isNaturalScrollingEnabled
+        naturalScrolling: @escaping () -> Bool = isNaturalScrollingEnabled,
+        spaceKeeper: FullScreenSpaceKeeper? = nil
     ) {
         self.post = post
         self.postControlArrow = postControlArrow
         self.naturalScrolling = naturalScrolling
+        self.spaceKeeper = spaceKeeper
     }
 
     func handle(_ event: PanelGestureEvent) {
         switch event {
         case let .began(axis, delta):
             cancel()
+            if axis == .vertical { spaceKeeper?.prepare() }
             self.axis = axis
             progress = Self.progress(for: delta, axis: axis)
             lastDelta = progress
@@ -80,7 +84,9 @@ final class DockSwipeController: @unchecked Sendable {
 
     /// A tap on the panel: Mission Control, immediately.
     func tap() {
+        spaceKeeper?.prepare()
         _ = postControlArrow(kVK_UpArrow)
+        spaceKeeper?.settle()
     }
 
     /// Closes an unfinished swipe so the Dock doesn't stay mid-transition.
@@ -101,6 +107,7 @@ final class DockSwipeController: @unchecked Sendable {
         progress = 0
         lastDelta = 0
         usesKeyboardFallback = false
+        spaceKeeper?.settle()
     }
 
     /// Horizontal motion is reversed so the desktop tracks the finger: moving left reveals the next
@@ -172,11 +179,16 @@ extension DockSwipeController {
 
     /// Whether the Dock is showing Mission Control, from its Accessibility tree.
     static func isMissionControlOpen() -> Bool {
-        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return false }
+        missionControlState() ?? false
+    }
+
+    /// As `isMissionControlOpen`, or nil when the Dock can't be read.
+    static func missionControlState() -> Bool? {
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return nil }
         var children: CFTypeRef?
         guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(dock.processIdentifier),
                                             kAXChildrenAttribute as CFString, &children) == .success,
-              let elements = children as? [AXUIElement] else { return false }
+              let elements = children as? [AXUIElement] else { return nil }
         return elements.contains { element in
             var identifier: CFTypeRef?
             return AXUIElementCopyAttributeValue(element, "AXIdentifier" as CFString, &identifier) == .success
