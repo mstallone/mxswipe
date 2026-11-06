@@ -72,7 +72,7 @@ final class MXMasterSession: @unchecked Sendable {
 
     private let recognizer: ContinuousGestureRecognizer
     private let dockSwipe: DockSwipeController
-    private let panelMotion = PanelMotionBuffer()
+    private let panelOutput: PanelGestureOutput
     private lazy var thumbScroll = ThumbWheelScrollController(queue: queue, postQueue: scrollQueue)
     private var onEvent: (@Sendable (SessionEvent) -> Void)?
 
@@ -101,6 +101,7 @@ final class MXMasterSession: @unchecked Sendable {
         )
         let spaceQueue = DispatchQueue(label: "com.mattstallone.mxmasterinput.spaces", qos: .userInitiated)
         dockSwipe = DockSwipeController(spaceKeeper: FullScreenSpaceKeeper(queue: spaceQueue))
+        panelOutput = PanelGestureOutput(queue: outputQueue, dockSwipe: dockSwipe)
     }
 
     /// Connects to the first MX Master 4 found. In observation mode nothing on the mouse is changed and
@@ -495,7 +496,7 @@ final class MXMasterSession: @unchecked Sendable {
         guard panelHeld, parameters.count >= 4 else { return }
         let dx = signed16(parameters[0], parameters[1]), dy = signed16(parameters[2], parameters[3])
         guard dx != 0 || dy != 0, let update = recognizer.ingest(dx: dx, dy: dy) else { return }
-        output(update.phase == .began ? .began(axis: update.axis, delta: update.delta) : .changed(delta: update.delta))
+        panelOutput.send(update.phase == .began ? .began(axis: update.axis, delta: update.delta) : .changed(delta: update.delta))
     }
 
     /// A list of the control IDs held down, zero-terminated.
@@ -511,27 +512,9 @@ final class MXMasterSession: @unchecked Sendable {
             panelHeld = false
             let end = recognizer.end()
             if end.didBeginSwipe {
-                output(.ended)
+                panelOutput.send(.ended)
             } else if end.isTap {
                 outputQueue.async { [dockSwipe] in dockSwipe.tap() }
-            }
-        }
-    }
-
-    /// Motion is summed until the output queue reaches it. Any other event takes the sum with it, so a
-    /// drain still queued can't pick up motion from after that event.
-    private func output(_ event: PanelGestureEvent) {
-        if case let .changed(delta) = event {
-            guard panelMotion.add(delta) else { return }
-            outputQueue.async { [dockSwipe, panelMotion] in
-                let motion = panelMotion.take()
-                dockSwipe.move(by: motion.total, latest: motion.latest)
-            }
-        } else {
-            let motion = panelMotion.take()
-            outputQueue.async { [dockSwipe] in
-                dockSwipe.move(by: motion.total, latest: motion.latest)
-                dockSwipe.handle(event)
             }
         }
     }
@@ -539,7 +522,7 @@ final class MXMasterSession: @unchecked Sendable {
     private func cancelGesture() {
         panelHeld = false
         recognizer.cancel()
-        outputQueue.async { [dockSwipe] in dockSwipe.cancel() }
+        panelOutput.send(.cancelled)
     }
 
     private func cancelThumbScroll() {

@@ -4,33 +4,70 @@ import Carbon.HIToolbox
 import Synchronization
 import SystemEvents
 
-/// Panel motion waiting to reach the Dock. Reports that arrive while a post is running are summed, so a
-/// slow post delays the desktop by one event rather than by a growing queue of stale ones.
-final class PanelMotionBuffer: Sendable {
-    private struct State {
-        var total = 0
-        var latest = 0
-        var drainScheduled = false
-    }
+/// Hands panel gestures to the Dock swipe on its queue. Reports that arrive while a post is running are
+/// summed, so a slow post delays the desktop by one event rather than by a growing queue of stale ones.
+///
+/// `send` is confined to the session queue.
+final class PanelGestureOutput: @unchecked Sendable {
+    /// Motion owned by one drain. Taking it closes it, so a drain left behind by a later event can't
+    /// reach motion that came after that event.
+    private final class Batch: Sendable {
+        private struct State {
+            var total: Int
+            var latest: Int
+            var isOpen = true
+        }
 
-    private let state = Mutex(State())
+        private let state: Mutex<State>
 
-    /// Returns true when the caller must schedule a `take()`; one is otherwise already on its way.
-    func add(_ delta: Int) -> Bool {
-        state.withLock {
-            $0.total += delta
-            $0.latest = delta
-            guard !$0.drainScheduled else { return false }
-            $0.drainScheduled = true
-            return true
+        init(_ delta: Int) {
+            state = Mutex(State(total: delta, latest: delta))
+        }
+
+        func add(_ delta: Int) -> Bool {
+            state.withLock {
+                guard $0.isOpen else { return false }
+                $0.total += delta
+                $0.latest = delta
+                return true
+            }
+        }
+
+        func take() -> (total: Int, latest: Int) {
+            state.withLock {
+                let motion = $0.isOpen ? ($0.total, $0.latest) : (0, 0)
+                $0.isOpen = false
+                return motion
+            }
         }
     }
 
-    func take() -> (total: Int, latest: Int) {
-        state.withLock {
-            let motion = ($0.total, $0.latest)
-            $0 = State()
-            return motion
+    private let queue: DispatchQueue
+    private let dockSwipe: DockSwipeController
+    private var batch: Batch?
+
+    init(queue: DispatchQueue, dockSwipe: DockSwipeController) {
+        self.queue = queue
+        self.dockSwipe = dockSwipe
+    }
+
+    func send(_ event: PanelGestureEvent) {
+        let dockSwipe = dockSwipe
+        if case let .changed(delta) = event {
+            if batch?.add(delta) == true { return }
+            let batch = Batch(delta)
+            self.batch = batch
+            queue.async {
+                let motion = batch.take()
+                dockSwipe.move(by: motion.total, latest: motion.latest)
+            }
+        } else {
+            let motion = batch?.take() ?? (total: 0, latest: 0)
+            batch = nil
+            queue.async {
+                dockSwipe.move(by: motion.total, latest: motion.latest)
+                dockSwipe.handle(event)
+            }
         }
     }
 }
