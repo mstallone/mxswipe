@@ -28,8 +28,9 @@ final class PanelMotionBuffer: Sendable {
 
     func take() -> (total: Int, latest: Int) {
         state.withLock {
-            defer { $0 = State() }
-            return ($0.total, $0.latest)
+            let motion = ($0.total, $0.latest)
+            $0 = State()
+            return motion
         }
     }
 }
