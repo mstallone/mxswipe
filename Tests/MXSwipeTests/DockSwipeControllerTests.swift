@@ -220,6 +220,44 @@ final class DockSwipeControllerTests: XCTestCase {
         XCTAssertEqual(field(dock, 129), 12)
     }
 
+    func testPanelMotionIsSummedWhileThePostIsBusy() {
+        let queue = DispatchQueue(label: "output")
+        let output = PanelGestureOutput(queue: queue, dockSwipe: makeController())
+        queue.suspend()
+        output.send(.began(axis: .horizontal, delta: -30))
+        output.send(.changed(delta: -10))
+        output.send(.changed(delta: -20))
+        queue.resume()
+        queue.sync {}
+        assertProgress([0.072, 0.144])
+    }
+
+    func testMotionDuringAStallStaysWithItsOwnGesture() {
+        let queue = DispatchQueue(label: "output")
+        let output = PanelGestureOutput(queue: queue, dockSwipe: makeController())
+        queue.suspend()
+        output.send(.began(axis: .horizontal, delta: -30))
+        output.send(.changed(delta: -10))
+        output.send(.ended)
+        output.send(.began(axis: .horizontal, delta: -30))
+        output.send(.changed(delta: -20))
+        output.send(.ended)
+        queue.resume()
+        queue.sync {}
+        XCTAssertEqual(swipes.map(\.phase), [.began, .changed, .ended, .began, .changed, .ended])
+        assertProgress([0.072, 0.096, 0.096, 0.072, 0.12, 0.12])
+    }
+
+    func testSummedMotionTakesDirectionAndExitSpeedFromTheLatestReport() throws {
+        let controller = makeController()
+        controller.handle(.began(axis: .horizontal, delta: -30))
+        controller.move(by: -35, latest: 5) // reversing, though the sum still moves forward
+        controller.handle(.ended)
+        let last = try XCTUnwrap(swipes.last)
+        XCTAssertEqual(last.phase, .cancelled)
+        XCTAssertEqual(last.exitSpeed, Double(-5) * DockSwipeController.progressPerUnit * 100, accuracy: 1e-9)
+    }
+
     private func assertProgress(_ expected: [Double], file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertEqual(swipes.count, expected.count, file: file, line: line)
         for (swipe, value) in zip(swipes, expected) {

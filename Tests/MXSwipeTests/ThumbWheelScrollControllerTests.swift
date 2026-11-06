@@ -222,7 +222,67 @@ final class ThumbWheelScrollControllerTests: XCTestCase {
         ThumbWheelReport(packet: packet, deviceIndex: 1, featureIndex: 8)
     }
 
+    func testStalledPostsDoNotQueueAndKeepEveryPixel() throws {
+        let queue = DispatchQueue(label: "session"), postQueue = DispatchQueue(label: "post")
+        let release = DispatchSemaphore(value: 0)
+        let posted = PostedDeltas()
+        let controller = ThumbWheelScrollController(queue: queue, postQueue: postQueue, naturalScrolling: { false }) {
+            posted.append($0.getDoubleValueField(.scrollWheelEventPointDeltaAxis2))
+            release.wait()
+        }
+        let reports = try (0 ..< 3).map { _ in try report(delta: 12, state: 2) }
+        queue.sync { for report in reports { controller.consume(report) } }
+        Thread.sleep(forTimeInterval: 0.1) // about twelve frames, with the first post stuck
+        XCTAssertEqual(posted.values.count, 1)
+
+        for _ in 0 ..< 64 { release.signal() }
+        let ending = try report(delta: 0, state: 3)
+        queue.sync { controller.consume(ending) }
+        waitUntil { !queue.sync { controller.isActive } }
+        postQueue.sync {}
+        XCTAssertEqual(posted.values.map(abs).reduce(0, +), 360)
+    }
+
+    func testReversalFlushesBufferedMotionAsOneEvent() throws {
+        var deltas: [Double] = []
+        let controller = ThumbWheelScrollController(naturalScrolling: { false }) {
+            deltas.append($0.getDoubleValueField(.scrollWheelEventPointDeltaAxis2))
+        }
+        controller.consume(try report(delta: 12, state: 2))
+        XCTAssertEqual(deltas.count, 1)
+        controller.consume(try report(delta: -12, state: 2))
+        XCTAssertEqual(deltas.count, 2, "the three buffered frames merge")
+        XCTAssertEqual(abs(deltas[0]) + abs(deltas[1]), 120)
+    }
+
+    func testTurnAfterAPausePostsWithoutWaitingForAFrame() throws {
+        let queue = DispatchQueue(label: "session")
+        let posted = PostedDeltas()
+        let controller = ThumbWheelScrollController(queue: queue, naturalScrolling: { false }) {
+            posted.append($0.getDoubleValueField(.scrollWheelEventPointDeltaAxis2))
+        }
+        let turn = try report(delta: 12, state: 2)
+        queue.sync { controller.consume(turn) }
+        waitUntil { posted.values.count == 4 } // the last frame stops the timer
+        queue.sync {
+            controller.consume(turn)
+            XCTAssertEqual(posted.values.count, 5)
+        }
+    }
+
+    private func waitUntil(_ condition: () -> Bool) {
+        let deadline = Date.now.addingTimeInterval(5)
+        while !condition(), Date.now < deadline { Thread.sleep(forTimeInterval: 0.005) }
+    }
+
     private func report(delta: Int16, state: UInt8) throws -> ThumbWheelReport {
         try XCTUnwrap(parse(packet(delta: delta, state: state)))
     }
+}
+
+private final class PostedDeltas: @unchecked Sendable {
+    private let lock = NSLock()
+    private var deltas: [Double] = []
+    var values: [Double] { lock.withLock { deltas } }
+    func append(_ delta: Double) { lock.withLock { deltas.append(delta) } }
 }

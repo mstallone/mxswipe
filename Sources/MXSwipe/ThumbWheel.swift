@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import Synchronization
 
 /// A rotation or touch report from the HID++ thumb wheel feature (0x2150), once it is diverted.
 struct ThumbWheelReport: Equatable {
@@ -31,21 +32,25 @@ final class ThumbWheelScrollController: @unchecked Sendable {
     private(set) var isActive = false
 
     private let queue: DispatchQueue?
+    private let postQueue: DispatchQueue?
     private let smoothingFrames: Int
     private let post: (CGEvent) -> Void
     private let naturalScrolling: () -> Bool
     private let pointerLocation: () -> CGPoint
     private let eventSource = makeEventSource()
     private var timer: DispatchSourceTimer?
+    private let postsInFlight = Atomic<Int>(0)
     private var pendingFrames: [Double] = []
     private var pixelRemainder = 0.0
     private var ending = false
     private var beganPosted = false
     private var direction = 1.0
 
-    /// Without a queue there is no frame timer; tests drive frames with `advanceFrame()`.
+    /// Without a queue there is no frame timer; tests drive frames with `advanceFrame()`. Events are
+    /// posted on `postQueue` when there is one, so a stalled post can't hold up `queue`.
     init(
         queue: DispatchQueue? = nil,
+        postQueue: DispatchQueue? = nil,
         smoothingFrames: Int = 4,
         pointerLocation: @escaping () -> CGPoint = { CGEvent(source: nil)?.location ?? .zero },
         naturalScrolling: @escaping () -> Bool = isNaturalScrollingEnabled,
@@ -53,6 +58,7 @@ final class ThumbWheelScrollController: @unchecked Sendable {
     ) {
         precondition(smoothingFrames > 0)
         self.queue = queue
+        self.postQueue = postQueue
         self.smoothingFrames = smoothingFrames
         self.pointerLocation = pointerLocation
         self.naturalScrolling = naturalScrolling
@@ -84,7 +90,8 @@ final class ThumbWheelScrollController: @unchecked Sendable {
                 pendingFrames[index] += (pixels * Double(index + 1) / Double(smoothingFrames)).rounded()
                     - (pixels * Double(index) / Double(smoothingFrames)).rounded()
             }
-            if !beganPosted { advanceFrame() }
+            // Move at once when no frame is due; otherwise a slow turn waits a frame on every step.
+            if !beganPosted || (queue != nil && timer == nil && !isPosting) { advanceFrame() }
             startTimerIfNeeded()
         }
         if report.state == .ended || report.state == .inactive { finish() }
@@ -122,21 +129,42 @@ final class ThumbWheelScrollController: @unchecked Sendable {
         }
     }
 
+    /// Skips the frame while a post is still running. Its pixels stay in the fixed-size pending frames,
+    /// so a stalled post slows the scroll instead of building a queue of stale events.
+    private func frameTimerFired() {
+        if !isPosting { advanceFrame() }
+    }
+
+    private var isPosting: Bool { postsInFlight.load(ordering: .relaxed) > 0 }
+
+    /// Posts as one event, so reversing during a stall adds one event rather than a frame's worth each.
     private func flushPendingFrames() {
-        while !pendingFrames.isEmpty { advanceFrame() }
+        guard !pendingFrames.isEmpty else { return }
+        pendingFrames = [pendingFrames.reduce(0, +)]
+        advanceFrame()
     }
 
     private func startTimerIfNeeded() {
         guard timer == nil, !pendingFrames.isEmpty, let queue else { return }
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 1.0 / 120, repeating: 1.0 / 120, leeway: .milliseconds(1))
-        timer.setEventHandler { [weak self] in self?.advanceFrame() }
+        timer.setEventHandler { [weak self] in self?.frameTimerFired() }
         self.timer = timer
         timer.resume()
     }
 
     private func send(delta: Double, phase: Phase) {
         guard let event = Self.makeEvent(delta: delta, phase: phase, source: eventSource) else { return }
+        guard let postQueue else { return stampAndPost(event) }
+        nonisolated(unsafe) let unsentEvent = event
+        postsInFlight.add(1, ordering: .relaxed)
+        postQueue.async { [self] in
+            stampAndPost(unsentEvent)
+            postsInFlight.subtract(1, ordering: .relaxed)
+        }
+    }
+
+    private func stampAndPost(_ event: CGEvent) {
         // Sample the pointer and modifiers for every frame, including the final one, so the scroll lands
         // where the pointer is now rather than where the gesture started.
         event.location = pointerLocation()

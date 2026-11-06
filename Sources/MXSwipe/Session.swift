@@ -65,12 +65,15 @@ final class MXMasterSession: @unchecked Sendable {
     /// Dock swipes and shortcuts post from their own queue: an Accessibility call can stall, and HID
     /// input must keep flowing meanwhile.
     private let outputQueue = DispatchQueue(label: "com.mattstallone.mxmasterinput.output", qos: .userInteractive)
+    /// Scrolling posts on its own queue for the same reason, and so that it can't delay the Dock.
+    private let scrollQueue = DispatchQueue(label: "com.mattstallone.mxmasterinput.scroll", qos: .userInteractive)
     private let pendingLock = NSLock()
     private var pending: PendingRequest?
 
     private let recognizer: ContinuousGestureRecognizer
     private let dockSwipe: DockSwipeController
-    private lazy var thumbScroll = ThumbWheelScrollController(queue: queue)
+    private let panelOutput: PanelGestureOutput
+    private lazy var thumbScroll = ThumbWheelScrollController(queue: queue, postQueue: scrollQueue)
     private var onEvent: (@Sendable (SessionEvent) -> Void)?
 
     private var device: HIDDevice?
@@ -98,6 +101,7 @@ final class MXMasterSession: @unchecked Sendable {
         )
         let spaceQueue = DispatchQueue(label: "com.mattstallone.mxmasterinput.spaces", qos: .userInitiated)
         dockSwipe = DockSwipeController(spaceKeeper: FullScreenSpaceKeeper(queue: spaceQueue))
+        panelOutput = PanelGestureOutput(queue: outputQueue, dockSwipe: dockSwipe)
     }
 
     /// Connects to the first MX Master 4 found. In observation mode nothing on the mouse is changed and
@@ -129,11 +133,12 @@ final class MXMasterSession: @unchecked Sendable {
         }
     }
 
-    /// For app termination, when there is no time to await. Also waits for the cancelled swipe to post,
-    /// so quitting mid-gesture can't leave the Dock between Spaces.
+    /// For app termination, when there is no time to await. Also waits for the cancelled swipe and scroll
+    /// to post, so quitting mid-gesture can't leave the Dock between Spaces.
     func stopSynchronously() {
         queue.sync { stopOnQueue() }
         outputQueue.sync {}
+        scrollQueue.sync {}
     }
 
     // MARK: Connecting
@@ -491,7 +496,7 @@ final class MXMasterSession: @unchecked Sendable {
         guard panelHeld, parameters.count >= 4 else { return }
         let dx = signed16(parameters[0], parameters[1]), dy = signed16(parameters[2], parameters[3])
         guard dx != 0 || dy != 0, let update = recognizer.ingest(dx: dx, dy: dy) else { return }
-        output(update.phase == .began ? .began(axis: update.axis, delta: update.delta) : .changed(delta: update.delta))
+        panelOutput.send(update.phase == .began ? .began(axis: update.axis, delta: update.delta) : .changed(delta: update.delta))
     }
 
     /// A list of the control IDs held down, zero-terminated.
@@ -507,21 +512,17 @@ final class MXMasterSession: @unchecked Sendable {
             panelHeld = false
             let end = recognizer.end()
             if end.didBeginSwipe {
-                output(.ended)
+                panelOutput.send(.ended)
             } else if end.isTap {
                 outputQueue.async { [dockSwipe] in dockSwipe.tap() }
             }
         }
     }
 
-    private func output(_ event: PanelGestureEvent) {
-        outputQueue.async { [dockSwipe] in dockSwipe.handle(event) }
-    }
-
     private func cancelGesture() {
         panelHeld = false
         recognizer.cancel()
-        outputQueue.async { [dockSwipe] in dockSwipe.cancel() }
+        panelOutput.send(.cancelled)
     }
 
     private func cancelThumbScroll() {

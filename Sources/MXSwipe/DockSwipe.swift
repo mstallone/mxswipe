@@ -1,7 +1,76 @@
 import AppKit
 import ApplicationServices
 import Carbon.HIToolbox
+import Synchronization
 import SystemEvents
+
+/// Hands panel gestures to the Dock swipe on its queue. Reports that arrive while a post is running are
+/// summed, so a slow post delays the desktop by one event rather than by a growing queue of stale ones.
+///
+/// `send` is confined to the session queue.
+final class PanelGestureOutput: @unchecked Sendable {
+    /// Motion owned by one drain. Taking it closes it, so a drain left behind by a later event can't
+    /// reach motion that came after that event.
+    private final class Batch: Sendable {
+        private struct State {
+            var total: Int
+            var latest: Int
+            var isOpen = true
+        }
+
+        private let state: Mutex<State>
+
+        init(_ delta: Int) {
+            state = Mutex(State(total: delta, latest: delta))
+        }
+
+        func add(_ delta: Int) -> Bool {
+            state.withLock {
+                guard $0.isOpen else { return false }
+                $0.total += delta
+                $0.latest = delta
+                return true
+            }
+        }
+
+        func take() -> (total: Int, latest: Int) {
+            state.withLock {
+                let motion = $0.isOpen ? ($0.total, $0.latest) : (0, 0)
+                $0.isOpen = false
+                return motion
+            }
+        }
+    }
+
+    private let queue: DispatchQueue
+    private let dockSwipe: DockSwipeController
+    private var batch: Batch?
+
+    init(queue: DispatchQueue, dockSwipe: DockSwipeController) {
+        self.queue = queue
+        self.dockSwipe = dockSwipe
+    }
+
+    func send(_ event: PanelGestureEvent) {
+        let dockSwipe = dockSwipe
+        if case let .changed(delta) = event {
+            if batch?.add(delta) == true { return }
+            let batch = Batch(delta)
+            self.batch = batch
+            queue.async {
+                let motion = batch.take()
+                dockSwipe.move(by: motion.total, latest: motion.latest)
+            }
+        } else {
+            let motion = batch?.take() ?? (total: 0, latest: 0)
+            batch = nil
+            queue.async {
+                dockSwipe.move(by: motion.total, latest: motion.latest)
+                dockSwipe.handle(event)
+            }
+        }
+    }
+}
 
 /// Drives the Dock's Space and Mission Control transitions from panel gestures, the way a trackpad does:
 /// the desktop follows the finger, then commits or springs back on release. When the private DockSwipe
@@ -61,10 +130,7 @@ final class DockSwipeController: @unchecked Sendable {
             usesKeyboardFallback = !post(swipe(.began))
 
         case let .changed(delta):
-            guard let axis, delta != 0 else { return }
-            lastDelta = Self.progress(for: delta, axis: axis)
-            progress += lastDelta
-            if !usesKeyboardFallback { _ = post(swipe(.changed)) }
+            move(by: delta, latest: delta)
 
         case .ended:
             guard let axis else { return }
@@ -80,6 +146,16 @@ final class DockSwipeController: @unchecked Sendable {
         case .cancelled:
             cancel()
         }
+    }
+
+    /// Applies motion summed from reports ending in `latest`, which alone sets the direction and exit
+    /// speed: the sum says how far the panel moved, not how fast or which way it was last going.
+    func move(by delta: Int, latest: Int) {
+        guard let axis, latest != 0 else { return }
+        lastDelta = Self.progress(for: latest, axis: axis)
+        guard delta != 0 else { return }
+        progress += Self.progress(for: delta, axis: axis)
+        if !usesKeyboardFallback { _ = post(swipe(.changed)) }
     }
 
     /// A tap on the panel: Mission Control, immediately.
