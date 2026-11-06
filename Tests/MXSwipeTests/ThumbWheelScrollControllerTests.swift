@@ -243,6 +243,18 @@ final class ThumbWheelScrollControllerTests: XCTestCase {
         XCTAssertEqual(posted.values.map(abs).reduce(0, +), 360)
     }
 
+    func testReversalFlushesBufferedMotionAsOneEvent() throws {
+        var deltas: [Double] = []
+        let controller = ThumbWheelScrollController(naturalScrolling: { false }) {
+            deltas.append($0.getDoubleValueField(.scrollWheelEventPointDeltaAxis2))
+        }
+        controller.consume(try report(delta: 12, state: 2))
+        XCTAssertEqual(deltas.count, 1)
+        controller.consume(try report(delta: -12, state: 2))
+        XCTAssertEqual(deltas.count, 2, "the three buffered frames merge")
+        XCTAssertEqual(abs(deltas[0]) + abs(deltas[1]), 120)
+    }
+
     func testTurnAfterAPausePostsWithoutWaitingForAFrame() throws {
         let queue = DispatchQueue(label: "session")
         let posted = PostedDeltas()

@@ -91,7 +91,7 @@ final class ThumbWheelScrollController: @unchecked Sendable {
                     - (pixels * Double(index) / Double(smoothingFrames)).rounded()
             }
             // Move at once when no frame is due; otherwise a slow turn waits a frame on every step.
-            if !beganPosted || (queue != nil && timer == nil) { advanceFrame() }
+            if !beganPosted || (queue != nil && timer == nil && !isPosting) { advanceFrame() }
             startTimerIfNeeded()
         }
         if report.state == .ended || report.state == .inactive { finish() }
@@ -132,11 +132,16 @@ final class ThumbWheelScrollController: @unchecked Sendable {
     /// Skips the frame while a post is still running. Its pixels stay in the fixed-size pending frames,
     /// so a stalled post slows the scroll instead of building a queue of stale events.
     private func frameTimerFired() {
-        if postsInFlight.load(ordering: .relaxed) == 0 { advanceFrame() }
+        if !isPosting { advanceFrame() }
     }
 
+    private var isPosting: Bool { postsInFlight.load(ordering: .relaxed) > 0 }
+
+    /// Posts as one event, so reversing during a stall adds one event rather than a frame's worth each.
     private func flushPendingFrames() {
-        while !pendingFrames.isEmpty { advanceFrame() }
+        guard !pendingFrames.isEmpty else { return }
+        pendingFrames = [pendingFrames.reduce(0, +)]
+        advanceFrame()
     }
 
     private func startTimerIfNeeded() {
